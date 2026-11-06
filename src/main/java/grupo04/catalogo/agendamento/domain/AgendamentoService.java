@@ -80,8 +80,7 @@ public class AgendamentoService {
 
     private void validarFeriado(AgendamentoRequestDto request, CatalogoResultado catalogo) {
         boolean feriado = catalogo.feriados().stream()
-                .anyMatch(f -> f.data().equals(request.dataInicio())
-                        || f.data().equals(request.dataFim()));
+                .anyMatch(f -> f.data().equals(request.dataInicio()));
 
         if (feriado) {
             meterRegistry.counter("agendamento.rejeitados", "motivo", "FERIADO").increment();

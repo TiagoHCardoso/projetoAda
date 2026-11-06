@@ -1,3 +1,17 @@
+# dia de feriado
+
+```powershell
+curl -i -X POST http://localhost:9091/agendamento \
+  -H "Content-Type: application/json" \
+  -d '{
+    "nome": "Reunião de planejamento",
+    "dataInicio": "2026-12-06",
+    "horaInicio": "09:00:00",
+    "dataFim": "2026-11-10",
+    "horaFim": "10:30:00"
+  }'
+```
+
 # agendamento simples
 
 agendar, buscar, deletar
@@ -125,3 +139,6 @@ curl -i -X GET "http://localhost:9091/q/metrics" \
 | `agendamento.rejeitados` | Counter | Operações rejeitadas por conflito de horário ou feriado |
 | `agendamento.consultas` | Counter | Consultas de agendamentos |
 | `agendamento.operacao.tempo` | Timer | Tempo gasto nas operações |
+
+
+docker logs catalogo-api-catalogo-api-1
