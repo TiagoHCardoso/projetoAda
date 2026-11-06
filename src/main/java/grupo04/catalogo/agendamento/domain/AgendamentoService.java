@@ -7,16 +7,16 @@ import grupo04.catalogo.agendamento.repository.AgendamentoRepository;
 import grupo04.catalogo.catalogoremoto.domain.CatalogoResultado;
 import grupo04.catalogo.catalogoremoto.domain.FeriadoService;
 import grupo04.catalogo.platform.error.exception.HorariosSobrepostosException;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import io.quarkus.panache.common.Sort;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.transaction.Transactional;
 
-import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.format.DateTimeParseException;
-import java.util.ArrayList;
 import java.util.List;
 
 /** Coordena operações de negócio e define os limites das transações. */
@@ -29,7 +29,12 @@ public class AgendamentoService {
     @Inject
     FeriadoService feriadoService;
 
+    @Inject
+    MeterRegistry meterRegistry;
+
     public List<AgendamentoBo> listar(String nome) {
+        meterRegistry.counter("agendamento.consultas", "operacao", "listar").increment();
+
         List<AgendamentoEntity> entidades = (nome == null || nome.isBlank())
                 ? repository.listAll(Sort.by("id"))
                 : repository.buscarPorNome(nome);
@@ -37,41 +42,51 @@ public class AgendamentoService {
     }
 
     public AgendamentoBo buscar(Long id) {
+        meterRegistry.counter("agendamento.consultas", "operacao", "buscar").increment();
+
         AgendamentoEntity entity = repository.findById(id);
         return entity == null ? null : toDomain(entity);
     }
 
     @Transactional
     public AgendamentoBo criar(AgendamentoRequestDto request) {
-        CatalogoResultado catalogoFeriados = feriadoService.getFeriados();
+        Timer.Sample timer = Timer.start(meterRegistry);
 
-        validarFeriado(request, catalogoFeriados);
-        validarSobreposicao(request);
+        try {
+            CatalogoResultado catalogoFeriados = feriadoService.getFeriados();
 
-        AgendamentoEntity entity = new AgendamentoEntity(
-                request.nome().trim(),
-                toString(request.dataInicio()),
-                toString(request.horaInicio()),
-                toString(request.dataFim()),
-                toString(request.horaFim())
-        );
+            validarFeriado(request, catalogoFeriados);
+            validarSobreposicao(request);
 
-        repository.persist(entity);
-        return toDomain(entity);
+            AgendamentoEntity entity = new AgendamentoEntity(
+                    request.nome().trim(),
+                    toString(request.dataInicio()),
+                    toString(request.horaInicio()),
+                    toString(request.dataFim()),
+                    toString(request.horaFim()));
+
+            repository.persist(entity);
+
+            meterRegistry.counter("agendamento.criados").increment();
+
+            return toDomain(entity);
+        } finally {
+            timer.stop(
+                    Timer.builder("agendamento.operacao.tempo")
+                            .tag("operacao", "criar")
+                            .register(meterRegistry));
+        }
     }
 
-    private void validarFeriado(
-            AgendamentoRequestDto request,
-            CatalogoResultado catalogo) {
-
+    private void validarFeriado(AgendamentoRequestDto request, CatalogoResultado catalogo) {
         boolean feriado = catalogo.feriados().stream()
                 .anyMatch(f -> f.data().equals(request.dataInicio())
                         || f.data().equals(request.dataFim()));
 
         if (feriado) {
-            throw new DiaIndisponivelException(
-                    "xx/xx/xxxx"
-            );
+            meterRegistry.counter("agendamento.rejeitados", "motivo", "FERIADO").increment();
+
+            throw new DiaIndisponivelException(toString(request.dataInicio()));
         }
     }
 
@@ -91,8 +106,7 @@ public class AgendamentoService {
 
         if ((fimData == null) != (fimHora == null)) {
             throw new IllegalArgumentException(
-                    "Data e hora de término devem ser informadas juntas."
-            );
+                    "Data e hora de término devem ser informadas juntas.");
         }
 
         List<AgendamentoEntity> existentes = repository.findAll().list()
@@ -113,22 +127,22 @@ public class AgendamentoService {
             LocalDate existenteFimData = parseDate(existente.dataFim);
             LocalTime existenteFimHora = parseTime(existente.horaFim);
 
-            boolean existentePontual =
-                    existenteFimData == null && existenteFimHora == null;
+            boolean existentePontual = existenteFimData == null && existenteFimHora == null;
 
             if (existentePontual) {
                 existenteFimData = existenteInicioData;
                 existenteFimHora = existenteInicioHora;
             }
 
-            boolean sobreposicao =
-                    comparar(inicioData, inicioHora,
-                            existenteFimData, existenteFimHora) <= 0
+            boolean sobreposicao = comparar(inicioData, inicioHora,
+                    existenteFimData, existenteFimHora) <= 0
                     &&
                     comparar(existenteInicioData, existenteInicioHora,
                             fimData, fimHora) <= 0;
 
             if (sobreposicao) {
+                meterRegistry.counter("agendamento.rejeitados", "motivo", "SOBREPOSICAO").increment();
+
                 throw new HorariosSobrepostosException();
             }
         }
@@ -151,28 +165,54 @@ public class AgendamentoService {
 
     @Transactional
     public AgendamentoBo atualizar(Long id, AgendamentoRequestDto request) {
-        CatalogoResultado catalogoFeriados = feriadoService.getFeriados();
+        Timer.Sample timer = Timer.start(meterRegistry);
 
-        validarFeriado(request, catalogoFeriados);
-        validarSobreposicao(id, request);
+        try {
+            CatalogoResultado catalogoFeriados = feriadoService.getFeriados();
 
-        AgendamentoEntity entity = repository.findById(id);
-        if (entity == null) {
-            return null;
+            validarFeriado(request, catalogoFeriados);
+            validarSobreposicao(id, request);
+
+            AgendamentoEntity entity = repository.findById(id);
+            if (entity == null) {
+                return null;
+            }
+            // Dirty checking: Hibernate atualiza o registro no commit da transação.
+            entity.nome = request.nome().trim();
+            entity.dataInicio = toString(request.dataInicio());
+            entity.horaInicio = toString(request.horaInicio());
+            entity.dataFim = toString(request.dataFim());
+            entity.horaFim = toString(request.horaFim());
+
+            meterRegistry.counter("agendamento.atualizados").increment();
+
+            return toDomain(entity);
+        } finally {
+            timer.stop(
+                    Timer.builder("agendamento.operacao.tempo")
+                            .tag("operacao", "atualizar")
+                            .register(meterRegistry));
         }
-        // Dirty checking: Hibernate atualiza o registro no commit da transação.
-        entity.nome = request.nome().trim();
-        entity.dataInicio = toString(request.dataInicio());
-        entity.horaInicio = toString(request.horaInicio());
-        entity.dataFim = toString(request.dataFim());
-        entity.horaFim = toString(request.horaFim());
-        
-        return toDomain(entity);
     }
 
     @Transactional
     public boolean excluir(Long id) {
-        return repository.deleteById(id);
+        Timer.Sample timer = Timer.start(meterRegistry);
+
+        try {
+            boolean excluido = repository.deleteById(id);
+
+            if (excluido) {
+                meterRegistry.counter("agendamento.excluidos").increment();
+            }
+
+            return excluido;
+        } finally {
+            timer.stop(
+                    Timer.builder("agendamento.operacao.tempo")
+                            .tag("operacao", "excluir")
+                            .register(meterRegistry));
+        }
     }
 
     private static AgendamentoBo toDomain(AgendamentoEntity entity) {
@@ -180,7 +220,7 @@ public class AgendamentoService {
         LocalTime horaInicio = parseTime(entity.horaInicio);
         LocalDate dataFim = parseDate(entity.dataFim);
         LocalTime horaFim = parseTime(entity.horaFim);
-        
+
         return new AgendamentoBo(entity.id, entity.nome, dataInicio, horaInicio, dataFim, horaFim);
     }
 
@@ -212,5 +252,3 @@ public class AgendamentoService {
         }
     }
 }
-
-//lancar as excecoes custom
